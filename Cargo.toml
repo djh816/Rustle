@@ -1,0 +1,36 @@
+[package]
+name = "Rustle"
+version = "0.1.0"
+edition = "2021"
+authors = ["/u/SpartanJubilee"]
+description = "A cross platform graphical Reddit client written in Rust"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+base64 = "0.21"
+eframe = { version = "0.26.2", features = ["persistence", "default_fonts"] }
+egui = "0.26.2"
+egui_extras = { version = "0.26.2", features = ["all_loaders", "image", "svg"] }
+image = { version = "0.24.8", features = ["png"] }
+keyring = "2.3.2"
+
+[package.metadata.bundle]
+name = "Rustle"
+identifier = "com.spartanjubilee.rustle"
+icon = ["assets/icon.png"]
+version = "0.1.0"
+resources = ["assets"]
+copyright = "Copyright (c) 2025 SpartanJubilee. All rights reserved."
+category = "Social Networking"
+short_description = "A cross platform graphical Reddit client written in Rust"
+long_description = """
+Rustle is a native Reddit client application written in Rust.
+It provides a clean, native interface for browsing Reddit content.
+"""
+osx_minimum_system_version = "10.15"
+deb_depends = []
+
