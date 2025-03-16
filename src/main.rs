@@ -714,32 +714,51 @@ impl eframe::App for RedditApp {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
                     ui.label(egui::RichText::new(APP_VERSION).weak());
-                    // Only enable refresh button if we have credentials and not showing settings
-                    let refresh_button = ui.add_enabled(
-                        self.has_credentials && !self.show_settings && !loading,
-                        egui::Button::new(
-                            egui::RichText::new("⟳")
-                                .size(16.0)
-                        ).min_size(egui::vec2(28.0, 28.0))
-                    );
-                    if refresh_button.clicked() {
-                        self.refresh_posts();
-                    }
-                    // Only enable settings button if we have credentials and not in initial load,
-                    // or if we're already in settings mode but have entered credentials
-                    let settings_button = ui.add_enabled(
-                        self.has_credentials,
-                        egui::Button::new(
-                            egui::RichText::new("⚙")
-                                .size(16.0)
-                        ).min_size(egui::vec2(28.0, 28.0))
-                    );
-                    if settings_button.clicked() {
-                        self.show_settings = !self.show_settings;
-                        if self.show_settings {
-                            *self.error_message.lock().unwrap() = None;
+                    
+                    // Create a container for the refresh button with fixed size
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(32.0, 32.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            // Only enable refresh button if we have credentials and not showing settings
+                            let refresh_button = ui.add_enabled(
+                                self.has_credentials && !self.show_settings && !loading,
+                                egui::Button::new(
+                                    egui::RichText::new("⟳")
+                                        .size(16.0)
+                                )
+                                .min_size(egui::vec2(28.0, 28.0))
+                                .rounding(5.0)
+                            );
+                            if refresh_button.clicked() {
+                                self.refresh_posts();
+                            }
                         }
-                    }
+                    );
+                    
+                    // Create a container for the settings button with fixed size
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(32.0, 32.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            // Only enable settings button if we have credentials
+                            let settings_button = ui.add_enabled(
+                                self.has_credentials,
+                                egui::Button::new(
+                                    egui::RichText::new("⚙")
+                                        .size(16.0)
+                                )
+                                .min_size(egui::vec2(28.0, 28.0))
+                                .rounding(5.0)
+                            );
+                            if settings_button.clicked() {
+                                self.show_settings = !self.show_settings;
+                                if self.show_settings {
+                                    *self.error_message.lock().unwrap() = None;
+                                }
+                            }
+                        }
+                    );
                 });
             });
             ui.add_space(2.0);
