@@ -8,3 +8,8 @@ Build Instructions:
 ```bash
 cargo build --release
 ```
+
+Optionally bundle as a macOS .app:
+```bash
+cargo bundle --target aarch64-apple-darwin --release
+```
