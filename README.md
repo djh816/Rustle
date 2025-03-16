@@ -4,6 +4,10 @@ Screenshots:
 ![Screenshot 1](./assets/screen1.png)
 ![Screenshot 2](./assets/screen2.png)
 
+Dependencies:
+• Latest version of RustUp and cargo
+• Linux may require libssl-dev or openssl-devel
+
 Build Instructions:
 ```bash
 cargo build --release
