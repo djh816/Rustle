@@ -65,6 +65,27 @@ struct ImageSource {
     height: u32,
 }
 
+// New structs for subreddit data
+#[derive(Debug, Deserialize)]
+struct SubredditListing {
+    data: SubredditListingData,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubredditListingData {
+    children: Vec<SubredditChild>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubredditChild {
+    data: SubredditData,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubredditData {
+    display_name: String,  // This is the subreddit name without the /r/ prefix
+}
+
 // Reddit API client
 #[derive(Clone)]
 struct RedditClient {
@@ -143,6 +164,55 @@ impl RedditClient {
             
         Ok((listing.data.children.into_iter().map(|child| child.data).collect(), listing.data.after))
     }
+
+    async fn get_subreddit_posts(&self, subreddit: &str, after: Option<&str>) -> Result<(Vec<Post>, Option<String>)> {
+        let access_token = self.access_token.as_ref()
+            .context("Not authenticated")?;
+
+        let mut url = format!("https://oauth.reddit.com/r/{}", subreddit);
+        if let Some(after_token) = after {
+            url = format!("{}?after={}", url, after_token);
+        }
+
+        let response = self.client
+            .get(&url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch subreddit posts: {}", response.status()));
+        }
+
+        let listing: RedditListing = response.json().await
+            .context("Failed to parse Reddit listing")?;
+            
+        Ok((listing.data.children.into_iter().map(|child| child.data).collect(), listing.data.after))
+    }
+
+    async fn get_subscribed_subreddits(&self) -> Result<Vec<String>> {
+        let access_token = self.access_token.as_ref()
+            .context("Not authenticated")?;
+
+        let url = "https://oauth.reddit.com/subreddits/mine/subscriber";
+
+        let response = self.client
+            .get(url)
+            .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to fetch subscribed subreddits: {}", response.status()));
+        }
+
+        let listing: SubredditListing = response.json().await
+            .context("Failed to parse subreddits listing")?;
+            
+        Ok(listing.data.children.into_iter()
+            .map(|child| child.data.display_name)
+            .collect())
+    }
 }
 
 // App state and UI
@@ -158,6 +228,9 @@ struct RedditApp {
     settings: Settings,
     settings_modified: bool,
     has_credentials: bool,
+    current_subreddit: Arc<Mutex<String>>,  // "home" for home feed, or subreddit name
+    subreddits: Arc<Mutex<Vec<String>>>,    // List of user's subscribed subreddits
+    loading_subreddits: Arc<Mutex<bool>>,   // Whether we're currently loading the subreddit list
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -217,6 +290,9 @@ impl RedditApp {
             settings,
             settings_modified: false,
             has_credentials,
+            current_subreddit: Arc::new(Mutex::new("home".to_string())),
+            subreddits: Arc::new(Mutex::new(Vec::new())),
+            loading_subreddits: Arc::new(Mutex::new(false)),
         }
     }
     
@@ -291,11 +367,12 @@ impl RedditApp {
 
     fn load_more_posts(&self) {
         if *self.loading.lock().unwrap() {
-            return; // Don't load if already loading
+            return;
         }
 
         *self.loading.lock().unwrap() = true;
         let after_token = self.after.lock().unwrap().clone();
+        let current_subreddit = self.current_subreddit.lock().unwrap().clone();
 
         let posts = self.posts.clone();
         let loading = self.loading.clone();
@@ -313,7 +390,6 @@ impl RedditApp {
                     if let Some(client) = client_guard.as_ref() {
                         client.clone()
                     } else {
-                        // Need to create and authenticate a new client
                         let mut client = match RedditClient::new() {
                             Ok(client) => client,
                             Err(e) => {
@@ -324,7 +400,6 @@ impl RedditApp {
                             }
                         };
                         
-                        // Authenticate
                         if let Err(e) = client.authenticate(&settings.client_id, &settings.client_secret, 
                             &settings.username, &settings.password).await {
                             *error_message.lock().unwrap() = Some(format!("Authentication error: {}", e));
@@ -338,14 +413,18 @@ impl RedditApp {
                     }
                 };
 
-                match client.get_home_feed(after_token.as_deref()).await {
+                let result = if current_subreddit == "home" {
+                    client.get_home_feed(after_token.as_deref()).await
+                } else {
+                    client.get_subreddit_posts(&current_subreddit, after_token.as_deref()).await
+                };
+
+                match result {
                     Ok((fetched_posts, new_after)) => {
                         let mut posts_lock = posts.lock().unwrap();
                         if after_token.is_none() {
-                            // First load, replace all posts
                             *posts_lock = fetched_posts;
                         } else {
-                            // Append new posts
                             posts_lock.extend(fetched_posts);
                         }
                         *after.lock().unwrap() = new_after;
@@ -369,66 +448,8 @@ impl RedditApp {
         let error_message = self.error_message.clone();
         let reddit_client = self.reddit_client.clone();
         let initial_load = self.initial_load.clone();
-
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let mut client = match RedditClient::new() {
-                    Ok(client) => client,
-                    Err(e) => {
-                        *error_message.lock().unwrap() = Some(format!("Failed to create client: {}", e));
-                        *loading.lock().unwrap() = false;
-                        *initial_load.lock().unwrap() = false;
-                        return;
-                    }
-                };
-                
-                // Authenticate
-                if let Err(e) = client.authenticate(&settings.client_id, &settings.client_secret, 
-                    &settings.username, &settings.password).await {
-                    *error_message.lock().unwrap() = Some(format!("Authentication error: {}", e));
-                    *loading.lock().unwrap() = false;
-                    *initial_load.lock().unwrap() = false;
-                    return;
-                }
-                
-                *reddit_client.lock().unwrap() = Some(client);
-                
-                // Fetch posts
-                match reddit_client.lock().unwrap().as_ref().unwrap().get_home_feed(None).await {
-                    Ok((fetched_posts, _after)) => {
-                        *posts.lock().unwrap() = fetched_posts;
-                        *loading.lock().unwrap() = false;
-                        *initial_load.lock().unwrap() = false;
-                    }
-                    Err(e) => {
-                        *error_message.lock().unwrap() = Some(format!("Error fetching posts: {}", e));
-                        *loading.lock().unwrap() = false;
-                        *initial_load.lock().unwrap() = false;
-                    }
-                }
-            });
-        });
-    }
-
-    fn refresh_posts(&self) {
-        if *self.loading.lock().unwrap() {
-            return; // Don't refresh if already loading
-        }
-
-        *self.loading.lock().unwrap() = true;
-        *self.after.lock().unwrap() = None;  // Reset pagination
-        *self.error_message.lock().unwrap() = None;
-        *self.initial_load.lock().unwrap() = true;
-        *self.scroll_to_top.lock().unwrap() = true;
-        
-        let settings = self.settings.clone();
-        let posts = self.posts.clone();
-        let loading = self.loading.clone();
-        let error_message = self.error_message.clone();
-        let reddit_client = self.reddit_client.clone();
-        let initial_load = self.initial_load.clone();
-        let after = self.after.clone();
+        let subreddits = self.subreddits.clone();
+        let loading_subreddits = self.loading_subreddits.clone();
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -454,14 +475,26 @@ impl RedditApp {
                 
                 *reddit_client.lock().unwrap() = Some(client.clone());
                 
-                // Fetch posts
+                // Load subreddits first
+                *loading_subreddits.lock().unwrap() = true;
+                match client.get_subscribed_subreddits().await {
+                    Ok(fetched_subreddits) => {
+                        *subreddits.lock().unwrap() = fetched_subreddits;
+                        *loading_subreddits.lock().unwrap() = false;
+                    }
+                    Err(e) => {
+                        *error_message.lock().unwrap() = Some(format!("Error fetching subreddits: {}", e));
+                        *loading_subreddits.lock().unwrap() = false;
+                        *loading.lock().unwrap() = false;
+                        *initial_load.lock().unwrap() = false;
+                        return;
+                    }
+                }
+                
+                // Then fetch posts
                 match client.get_home_feed(None).await {
-                    Ok((fetched_posts, new_after)) => {
-                        let mut posts_lock = posts.lock().unwrap();
-                        *posts_lock = fetched_posts;
-                        drop(posts_lock); // Release the lock before updating other state
-                        
-                        *after.lock().unwrap() = new_after;
+                    Ok((fetched_posts, _after)) => {
+                        *posts.lock().unwrap() = fetched_posts;
                         *loading.lock().unwrap() = false;
                         *initial_load.lock().unwrap() = false;
                     }
@@ -473,6 +506,11 @@ impl RedditApp {
                 }
             });
         });
+    }
+
+    fn refresh_posts(&self) {
+        let current = self.current_subreddit.lock().unwrap().clone();
+        self.switch_subreddit(current);
     }
 
     fn handle_scroll_state(&self, ctx: &egui::Context) {
@@ -492,6 +530,138 @@ impl RedditApp {
         if *self.scroll_to_top.lock().unwrap() {
             ctx.request_repaint();
         }
+    }
+
+    fn load_subreddits(&self) {
+        if *self.loading_subreddits.lock().unwrap() {
+            return;
+        }
+
+        *self.loading_subreddits.lock().unwrap() = true;
+        let reddit_client = self.reddit_client.clone();
+        let subreddits = self.subreddits.clone();
+        let loading_subreddits = self.loading_subreddits.clone();
+        let error_message = self.error_message.clone();
+        let settings = self.settings.clone();
+
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let client = {
+                    let mut client_guard = reddit_client.lock().unwrap();
+                    if let Some(client) = client_guard.as_ref() {
+                        client.clone()
+                    } else {
+                        let mut client = match RedditClient::new() {
+                            Ok(client) => client,
+                            Err(e) => {
+                                *error_message.lock().unwrap() = Some(format!("Failed to create client: {}", e));
+                                *loading_subreddits.lock().unwrap() = false;
+                                return;
+                            }
+                        };
+                        
+                        if let Err(e) = client.authenticate(&settings.client_id, &settings.client_secret, 
+                            &settings.username, &settings.password).await {
+                            *error_message.lock().unwrap() = Some(format!("Authentication error: {}", e));
+                            *loading_subreddits.lock().unwrap() = false;
+                            return;
+                        }
+                        
+                        *client_guard = Some(client.clone());
+                        client
+                    }
+                };
+
+                match client.get_subscribed_subreddits().await {
+                    Ok(fetched_subreddits) => {
+                        *subreddits.lock().unwrap() = fetched_subreddits;
+                        *loading_subreddits.lock().unwrap() = false;
+                    }
+                    Err(e) => {
+                        *error_message.lock().unwrap() = Some(format!("Error fetching subreddits: {}", e));
+                        *loading_subreddits.lock().unwrap() = false;
+                    }
+                }
+            });
+        });
+    }
+
+    fn switch_subreddit(&self, subreddit: String) {
+        if *self.loading.lock().unwrap() {
+            return;
+        }
+
+        *self.current_subreddit.lock().unwrap() = subreddit.clone();
+        *self.loading.lock().unwrap() = true;
+        *self.after.lock().unwrap() = None;  // Reset pagination
+        *self.error_message.lock().unwrap() = None;
+        *self.initial_load.lock().unwrap() = true;
+        *self.scroll_to_top.lock().unwrap() = true;
+        
+        let reddit_client = self.reddit_client.clone();
+        let posts = self.posts.clone();
+        let loading = self.loading.clone();
+        let error_message = self.error_message.clone();
+        let initial_load = self.initial_load.clone();
+        let after = self.after.clone();
+        let settings = self.settings.clone();
+
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let client = {
+                    let mut client_guard = reddit_client.lock().unwrap();
+                    if let Some(client) = client_guard.as_ref() {
+                        client.clone()
+                    } else {
+                        let mut client = match RedditClient::new() {
+                            Ok(client) => client,
+                            Err(e) => {
+                                *error_message.lock().unwrap() = Some(format!("Failed to create client: {}", e));
+                                *loading.lock().unwrap() = false;
+                                *initial_load.lock().unwrap() = false;
+                                return;
+                            }
+                        };
+                        
+                        if let Err(e) = client.authenticate(&settings.client_id, &settings.client_secret, 
+                            &settings.username, &settings.password).await {
+                            *error_message.lock().unwrap() = Some(format!("Authentication error: {}", e));
+                            *loading.lock().unwrap() = false;
+                            *initial_load.lock().unwrap() = false;
+                            return;
+                        }
+                        
+                        *client_guard = Some(client.clone());
+                        client
+                    }
+                };
+
+                let result = if subreddit == "home" {
+                    client.get_home_feed(None).await
+                } else {
+                    client.get_subreddit_posts(&subreddit, None).await
+                };
+
+                match result {
+                    Ok((fetched_posts, new_after)) => {
+                        let mut posts_lock = posts.lock().unwrap();
+                        *posts_lock = fetched_posts;
+                        drop(posts_lock);
+                        
+                        *after.lock().unwrap() = new_after;
+                        *loading.lock().unwrap() = false;
+                        *initial_load.lock().unwrap() = false;
+                    }
+                    Err(e) => {
+                        *error_message.lock().unwrap() = Some(format!("Error fetching posts: {}", e));
+                        *loading.lock().unwrap() = false;
+                        *initial_load.lock().unwrap() = false;
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -524,6 +694,11 @@ impl eframe::App for RedditApp {
             ctx.request_repaint();
         }
 
+        // Load subreddits if we haven't yet and we're authenticated
+        if self.has_credentials && self.subreddits.lock().unwrap().is_empty() && !*self.loading_subreddits.lock().unwrap() {
+            self.load_subreddits();
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(
@@ -531,39 +706,77 @@ impl eframe::App for RedditApp {
                         .strong()
                         .size(24.0)
                 );
-                ui.label(
-                    egui::RichText::new("Home Feed")
-                        .weak()
-                        .size(18.0)
-                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
                     ui.label(egui::RichText::new(APP_VERSION).weak());
-                    if ui.add_sized(
-                        egui::vec2(28.0, 28.0),
+                    // Only enable refresh button if we have credentials and not showing settings
+                    let refresh_button = ui.add_enabled(
+                        self.has_credentials && !self.show_settings && !loading,
                         egui::Button::new(
                             egui::RichText::new("⟳")
                                 .size(16.0)
-                        )
-                    ).clicked() && !loading {
+                        ).min_size(egui::vec2(28.0, 28.0))
+                    );
+                    if refresh_button.clicked() {
                         self.refresh_posts();
                     }
-                    if ui.add_sized(
-                        egui::vec2(28.0, 28.0),
+                    // Only enable settings button if we have credentials and not in initial load,
+                    // or if we're already in settings mode but have entered credentials
+                    let settings_button = ui.add_enabled(
+                        self.has_credentials,
                         egui::Button::new(
                             egui::RichText::new("⚙")
                                 .size(16.0)
-                        )
-                    ).clicked() {
-                        self.show_settings = !self.show_settings;  // Toggle settings visibility
+                        ).min_size(egui::vec2(28.0, 28.0))
+                    );
+                    if settings_button.clicked() {
+                        self.show_settings = !self.show_settings;
                         if self.show_settings {
-                            // Clear error message when opening settings
                             *self.error_message.lock().unwrap() = None;
                         }
                     }
                 });
             });
             ui.add_space(2.0);
-            ui.separator();
+
+            // Subreddit navigation bar
+            if self.has_credentials && !self.show_settings {
+                ui.horizontal_wrapped(|ui| {
+                    let current = self.current_subreddit.lock().unwrap().clone();
+                    let subreddits = self.subreddits.lock().unwrap().clone();
+                    
+                    // Home feed link
+                    if ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("/r/home")
+                                .color(if current == "home" {
+                                    ui.style().visuals.text_color()
+                                } else {
+                                    ui.style().visuals.weak_text_color()
+                                })
+                        ).frame(false)
+                    ).clicked() && !loading && current != "home" {
+                        self.switch_subreddit("home".to_string());
+                    }
+
+                    // Add subreddits with spacing
+                    for subreddit in subreddits.iter() {
+                        ui.add_space(8.0);
+                        if ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("/r/{}", subreddit))
+                                    .color(if current == *subreddit {
+                                        ui.style().visuals.text_color()
+                                    } else {
+                                        ui.style().visuals.weak_text_color()
+                                    })
+                            ).frame(false)
+                        ).clicked() && !loading && current != *subreddit {
+                            self.switch_subreddit(subreddit.clone());
+                        }
+                    }
+                });
+                ui.separator();
+            }
             
             // Error message display (if any)
             if let Some(error) = self.error_message.lock().unwrap().as_ref() {
@@ -658,10 +871,12 @@ impl eframe::App for RedditApp {
                                 }
                                 ui.horizontal(|ui| {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
-                                        if ui.button("Cancel").clicked() && self.has_credentials {
-                                            self.settings = Settings::load();
-                                            self.settings_modified = false;
-                                            self.show_settings = false;
+                                        if self.has_credentials {
+                                            if ui.button("Cancel").clicked() {
+                                                self.settings = Settings::load();
+                                                self.settings_modified = false;
+                                                self.show_settings = false;
+                                            }
                                         }
                                         if ui.button("Save").clicked() {
                                             if let Err(e) = self.settings.save() {
@@ -813,6 +1028,9 @@ impl<'de> serde::Deserialize<'de> for RedditApp {
                     settings,
                     settings_modified: false,
                     has_credentials,
+                    current_subreddit: Arc::new(Mutex::new("home".to_string())),
+                    subreddits: Arc::new(Mutex::new(Vec::new())),
+                    loading_subreddits: Arc::new(Mutex::new(false)),
                 })
             }
         }
