@@ -6,7 +6,7 @@ Screenshots:
 
 Dependencies:\
 • Latest version of RustUp and cargo\
-• Linux may require libssl-dev or openssl-devel
+• Linux may require libssl-dev or openssl-devel, along with pkg-config
 
 Build Instructions:
 ```bash
