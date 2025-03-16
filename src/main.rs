@@ -231,6 +231,8 @@ struct RedditApp {
     current_subreddit: Arc<Mutex<String>>,  // "home" for home feed, or subreddit name
     subreddits: Arc<Mutex<Vec<String>>>,    // List of user's subscribed subreddits
     loading_subreddits: Arc<Mutex<bool>>,   // Whether we're currently loading the subreddit list
+    last_scroll_pos: Arc<Mutex<f32>>,       // Track the last scroll position
+    is_loading_more: Arc<Mutex<bool>>,      // Track if we're in the process of loading more posts
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -293,6 +295,8 @@ impl RedditApp {
             current_subreddit: Arc::new(Mutex::new("home".to_string())),
             subreddits: Arc::new(Mutex::new(Vec::new())),
             loading_subreddits: Arc::new(Mutex::new(false)),
+            last_scroll_pos: Arc::new(Mutex::new(0.0)),
+            is_loading_more: Arc::new(Mutex::new(false)),
         }
     }
     
@@ -422,9 +426,11 @@ impl RedditApp {
                 match result {
                     Ok((fetched_posts, new_after)) => {
                         let mut posts_lock = posts.lock().unwrap();
-                        if after_token.is_none() {
+                        if after_token.is_none() && posts_lock.is_empty() {
+                            // Only replace posts if we're starting fresh with no posts
                             *posts_lock = fetched_posts;
                         } else {
+                            // Otherwise always append
                             posts_lock.extend(fetched_posts);
                         }
                         *after.lock().unwrap() = new_after;
@@ -939,10 +945,47 @@ impl eframe::App for RedditApp {
                         // Check if we're near the bottom and should load more
                         let rect = ui.clip_rect();
                         let max_rect = ui.max_rect();
-                        if !loading && (max_rect.bottom() - rect.bottom()) < 800.0 {
+                        
+                        // Get current scroll position from the scroll area
+                        let scroll_y = ui.clip_rect().top() - ui.min_rect().top();
+                        let mut last_scroll_pos = self.last_scroll_pos.lock().unwrap();
+                        
+                        // Calculate how far we are from the bottom
+                        let distance_from_bottom = max_rect.bottom() - rect.bottom();
+                        
+                        // Load more posts when we're within 1500px of the bottom
+                        // This is much earlier than before to ensure posts are preloaded
+                        if !loading && 
+                           distance_from_bottom < 1500.0 && 
+                           !*self.is_loading_more.lock().unwrap() {
+                            
+                            // Mark that we're loading more posts
+                            *self.is_loading_more.lock().unwrap() = true;
+                            
+                            // Make sure we have the current after token before loading more
+                            let current_after = self.after.lock().unwrap().clone();
+                            if current_after.is_none() {
+                                // If after is None but we have posts, something is wrong
+                                // Reset the after token to ensure we don't replace existing posts
+                                if !posts.is_empty() {
+                                    *self.after.lock().unwrap() = Some("".to_string());
+                                }
+                            }
+                            
                             self.load_more_posts();
+                            
+                            // Schedule a delayed reset of the loading more flag
+                            let is_loading_more = self.is_loading_more.clone();
+                            let repaint_after = std::time::Duration::from_millis(500);
+                            std::thread::spawn(move || {
+                                std::thread::sleep(repaint_after);
+                                *is_loading_more.lock().unwrap() = false;
+                            });
                         }
-
+                        
+                        // Update the last scroll position
+                        *last_scroll_pos = scroll_y;
+                        
                         // Show a small loading indicator at the bottom while loading more posts
                         if loading && !initial_load {
                             ui.vertical_centered(|ui| {
@@ -1031,6 +1074,8 @@ impl<'de> serde::Deserialize<'de> for RedditApp {
                     current_subreddit: Arc::new(Mutex::new("home".to_string())),
                     subreddits: Arc::new(Mutex::new(Vec::new())),
                     loading_subreddits: Arc::new(Mutex::new(false)),
+                    last_scroll_pos: Arc::new(Mutex::new(0.0)),
+                    is_loading_more: Arc::new(Mutex::new(false)),
                 })
             }
         }
