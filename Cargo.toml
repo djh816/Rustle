@@ -26,7 +26,7 @@ version = "0.1.0"
 resources = ["assets"]
 copyright = "Copyright (c) 2025 SpartanJubilee. All rights reserved."
 category = "Social Networking"
-short_description = "A cross platform graphical Reddit client written in Rust"
+short_description = "A minimal, cross platform, graphical (egui) Reddit client written in Rust"
 long_description = """
 Rustle is a native Reddit client application written in Rust.
 It provides a clean, native interface for browsing Reddit content.
