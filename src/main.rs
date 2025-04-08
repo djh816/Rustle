@@ -242,6 +242,7 @@ struct Settings {
     username: String,
     password: String,
     dark_mode: bool,  // Add theme preference
+    font_size: f32,   // Add font size preference
 }
 
 impl Settings {
@@ -261,6 +262,7 @@ impl Settings {
             username: String::new(),
             password: String::new(),
             dark_mode: true,  // Default to dark mode
+            font_size: 1.0,   // Default font size
         }
     }
 
@@ -282,13 +284,13 @@ impl RedditApp {
 
         Self { 
             posts: Arc::new(Mutex::new(Vec::new())),
-            loading: Arc::new(Mutex::new(has_credentials)),  // Start loading if we have credentials
+            loading: Arc::new(Mutex::new(has_credentials)),
             error_message: Arc::new(Mutex::new(None)),
             reddit_client: Arc::new(Mutex::new(None)),
             after: Arc::new(Mutex::new(None)),
-            initial_load: Arc::new(Mutex::new(has_credentials)),  // Show initial load if we have credentials
-            scroll_to_top: Arc::new(Mutex::new(true)),  // Always start at top on fresh launch
-            show_settings: !has_credentials,  // Show settings if no credentials
+            initial_load: Arc::new(Mutex::new(has_credentials)),
+            scroll_to_top: Arc::new(Mutex::new(true)),
+            show_settings: !has_credentials,
             settings,
             settings_modified: false,
             has_credentials,
@@ -347,7 +349,7 @@ impl RedditApp {
                         ui.add(
                             egui::Hyperlink::from_label_and_url(
                                 egui::RichText::new(&post.title)
-                                    .size(16.0)
+                                    .size(16.0 * self.settings.font_size)
                                     .strong(),
                                 &post.url
                             )
@@ -356,13 +358,13 @@ impl RedditApp {
                         // Post metadata
                         ui.label(
                             egui::RichText::new(format!("Posted by u/{} in r/{}", post.author, post.subreddit))
-                                .size(12.0)
+                                .size(12.0 * self.settings.font_size)
                                 .weak()
                         );
                         
                         ui.label(
                             egui::RichText::new(format!("Score: {}", post.score))
-                                .size(12.0)
+                                .size(12.0 * self.settings.font_size)
                         );
                     });
                 });
@@ -710,17 +712,41 @@ impl eframe::App for RedditApp {
                 ui.heading(
                     egui::RichText::new(APP_NAME)
                         .strong()
-                        .size(24.0)
+                        .size(24.0)  // Keep Rustle title at fixed size
                 );
+                ui.label(egui::RichText::new(APP_VERSION).weak().size(12.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
-                    ui.label(egui::RichText::new(APP_VERSION).weak());
+                    // Font size controls and buttons
+                    ui.add_space(4.0); // Add a small space at the right edge
                     
-                    // Create a container for the refresh button with fixed size
+                    // Settings button
                     ui.allocate_ui_with_layout(
                         egui::vec2(32.0, 32.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
-                            // Only enable refresh button if we have credentials and not showing settings
+                            let settings_button = ui.add_enabled(
+                                self.has_credentials,
+                                egui::Button::new(
+                                    egui::RichText::new("⚙")
+                                        .size(16.0)
+                                )
+                                .min_size(egui::vec2(28.0, 28.0))
+                                .rounding(5.0)
+                            );
+                            if settings_button.clicked() {
+                                self.show_settings = !self.show_settings;
+                                if self.show_settings {
+                                    *self.error_message.lock().unwrap() = None;
+                                }
+                            }
+                        }
+                    );
+                    
+                    // Refresh button
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(32.0, 32.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
                             let refresh_button = ui.add_enabled(
                                 self.has_credentials && !self.show_settings && !loading,
                                 egui::Button::new(
@@ -735,26 +761,46 @@ impl eframe::App for RedditApp {
                             }
                         }
                     );
-                    
-                    // Create a container for the settings button with fixed size
+
+                    // Font size increase button
                     ui.allocate_ui_with_layout(
                         egui::vec2(32.0, 32.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
-                            // Only enable settings button if we have credentials
-                            let settings_button = ui.add_enabled(
-                                self.has_credentials,
+                            if ui.add(
                                 egui::Button::new(
-                                    egui::RichText::new("⚙")
+                                    egui::RichText::new("A+")
                                         .size(16.0)
                                 )
                                 .min_size(egui::vec2(28.0, 28.0))
                                 .rounding(5.0)
-                            );
-                            if settings_button.clicked() {
-                                self.show_settings = !self.show_settings;
-                                if self.show_settings {
-                                    *self.error_message.lock().unwrap() = None;
+                            ).clicked() {
+                                self.settings.font_size = (self.settings.font_size + 0.1).min(2.0);
+                                self.settings_modified = true;
+                                if let Err(e) = self.settings.save() {
+                                    *self.error_message.lock().unwrap() = Some(format!("Failed to save settings: {}", e));
+                                }
+                            }
+                        }
+                    );
+
+                    // Font size decrease button
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(32.0, 32.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            if ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("A-")
+                                        .size(16.0)
+                                )
+                                .min_size(egui::vec2(28.0, 28.0))
+                                .rounding(5.0)
+                            ).clicked() {
+                                self.settings.font_size = (self.settings.font_size - 0.1).max(0.5);
+                                self.settings_modified = true;
+                                if let Err(e) = self.settings.save() {
+                                    *self.error_message.lock().unwrap() = Some(format!("Failed to save settings: {}", e));
                                 }
                             }
                         }
@@ -1085,7 +1131,7 @@ impl<'de> serde::Deserialize<'de> for RedditApp {
                     reddit_client: Arc::new(Mutex::new(None)),
                     after: Arc::new(Mutex::new(None)),
                     initial_load: Arc::new(Mutex::new(has_credentials)),
-                    scroll_to_top: Arc::new(Mutex::new(true)), // Always start at top
+                    scroll_to_top: Arc::new(Mutex::new(true)),
                     show_settings: !has_credentials,
                     settings,
                     settings_modified: false,
